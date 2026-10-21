@@ -1,0 +1,990 @@
+asyncapi: 3.0.0
+id: urn:com:tradelocker:streams-api
+defaultContentType: application/json
+
+info:
+  title: TradeLocker Streams API
+  version: 1.1.0
+  description: |
+    Real-time account updates for TradeLocker accounts over [Socket.IO](https://socket.io/):
+    account status (balance, equity, margin), positions, closed positions and orders.
+
+    One Socket.IO connection carries many accounts. You connect once with your
+    `developer-api-key`, then subscribe each account with a short-lived account token.
+
+    ## Quick start
+
+    1. **Get account tokens.** `POST https://{live|demo}.tradelocker.com/backend-api/auth/jwt/accounts/tokens`
+       with the user's `email`, `password` and `server` returns one JWT per account
+       (see the `accountsTokens` channel). Do **not** send your `developer-api-key` to this endpoint.
+    2. **Connect once.** Socket.IO v4 client, namespace `/streams-api`, path `/streams-api/socket.io`,
+       transport `websocket`, header `developer-api-key: <your key>`. Wait for the
+       `connection` event with `code: connected` before you subscribe.
+    3. **Subscribe each account** on the same socket: emit `subscriptions` with
+       `{"action":"SUBSCRIBE","token":"<account JWT>"}` **and an acknowledgement callback**.
+    4. **Read the `stream` event.** For each account you first get a snapshot
+       (AccountStatus, Position, OpenOrder messages), then `Property` `SyncEnd`, then live updates.
+       Route messages by `brandId` + `accountId`; every message carries both.
+
+    ## Connection settings
+
+    | Setting | Value |
+    |---|---|
+    | Protocol | Socket.IO v4 (Engine.IO 4) |
+    | Namespace | `/streams-api` |
+    | Handshake path | `/streams-api/socket.io` |
+    | Transport | `websocket` only (no HTTP long-polling) |
+    | Auth | header `developer-api-key` on the handshake |
+    | Server ping | every 1 s, connection closed after 60 s without a pong |
+
+    ## Rules that save you a support ticket
+
+    - **One socket, many accounts.** Do not open a socket per account. Connections per developer key
+      are capped; above the cap the handshake is rejected with `conflict`.
+    - **Subscriptions belong to the socket.** When the socket closes, every subscription on it ends.
+      Socket.IO clients reconnect automatically with a *new* socket, so you must **subscribe all
+      accounts again on every `connect`**.
+    - **Reconnect after a server-side close too.** Socket.IO clients retry on their own after
+      network errors and ping timeouts, but not when the server closed the connection
+      (`io server disconnect`), for example during a deploy. Reconnect yourself in that case, or every
+      account goes silent while your process looks healthy.
+    - **`SyncEnd` can arrive before the subscribe acknowledgement.** Start waiting for `SyncEnd`
+      for an account *before* you emit its SUBSCRIBE.
+    - **Use IDs exactly as the server sends them.** `brandId` and `accountId` are matched exactly
+      (case-sensitive). Take them from the token's `brand` and `aid` claims or from stream messages,
+      never from user input. `Blueg` is not `BLUEG`.
+    - **A subscribe can take up to about 60 s** (trade-node logon plus snapshot). Give the
+      acknowledgement a timeout of at least 65 s.
+    - **`Property` `Disconnected`** means that one account's stream ended. You also get it right
+      after your own UNSUBSCRIBE; any other time it ended on the server side: subscribe that
+      account again (with a fresh token if the old one has expired).
+    - **Numbers are decimal strings** (`"10628.95"`). Parse them with a decimal type, not a float.
+      Fields with no value are omitted, not sent as `null`.
+    - **Ignore message types and fields you do not know.** New ones can be added without notice.
+
+    Examples in Node.js, Python, Java and C#: https://github.com/TradeLocker/streams-api-docs
+  contact:
+    name: TradeLocker API support
+    url: https://github.com/TradeLocker/streams-api-docs
+  externalDocs:
+    description: TradeLocker REST API (orders, positions, history)
+    url: https://public-api.tradelocker.com/
+  tags:
+    - name: streams
+      description: Socket.IO events of the Streams API.
+    - name: auth
+      description: HTTP endpoint that issues account tokens for the Streams API.
+
+servers:
+  production:
+    host: api.tradelocker.com
+    pathname: /streams-api
+    protocol: wss
+    title: Production
+    summary: Production Streams API.
+    description: |
+      Socket.IO URL `https://api.tradelocker.com/streams-api` with path `/streams-api/socket.io`.
+    security:
+      - $ref: '#/components/securitySchemes/developerApiKey'
+    tags:
+      - name: env:production
+  production-direct:
+    host: connect.tradelocker.com
+    pathname: /streams-api
+    protocol: wss
+    title: Production (direct)
+    summary: Same production service, reached without an HTTP proxy in front.
+    description: |
+      Socket.IO URL `https://connect.tradelocker.com/streams-api` with path `/streams-api/socket.io`.
+      Same accounts, keys and behaviour as `production`.
+    security:
+      - $ref: '#/components/securitySchemes/developerApiKey'
+    tags:
+      - name: env:production
+  development:
+    host: api-dev.tradelocker.com
+    pathname: /streams-api
+    protocol: wss
+    title: Development
+    summary: Development Streams API, for development developer keys and staging
+      accounts.
+    security:
+      - $ref: '#/components/securitySchemes/developerApiKey'
+    tags:
+      - name: env:development
+  auth-live:
+    host: live.tradelocker.com
+    pathname: /backend-api
+    protocol: https
+    title: Live accounts (token endpoint)
+    summary: Issues account tokens for live accounts.
+    tags:
+      - name: env:production
+  auth-demo:
+    host: demo.tradelocker.com
+    pathname: /backend-api
+    protocol: https
+    title: Demo accounts (token endpoint)
+    summary: Issues account tokens for demo accounts.
+    tags:
+      - name: env:production
+  auth-staging:
+    host: stg.tradelocker.com
+    pathname: /backend-api
+    protocol: https
+    title: Staging accounts (token endpoint)
+    summary: Issues account tokens for the development Streams API.
+    tags:
+      - name: env:development
+
+channels:
+  connection:
+    address: connection
+    title: connection
+    summary: Handshake result and socket-level status.
+    description: |
+      Socket.IO event `connection`, sent by the server:
+
+      - right after the handshake: `{"status":"ok","code":"connected"}` when the
+        `developer-api-key` is accepted. Subscribe only after this.
+      - when the handshake is rejected: `status: error` with `unauthorized.streams.invalidApiKey`,
+        `unauthorized.streams.developer.notFound`, `conflict` or `unknown`. The server then closes
+        the socket. Do not reconnect in a tight loop on these codes.
+      - when the service shuts down: `{"status":"ok","code":"disconnected"}`. All subscriptions on
+        the socket have ended; reconnect and subscribe again.
+    servers:
+      - $ref: '#/servers/production'
+      - $ref: '#/servers/production-direct'
+      - $ref: '#/servers/development'
+    messages:
+      ConnectionStatus:
+        $ref: '#/components/messages/ConnectionStatus'
+
+  subscriptions:
+    address: subscriptions
+    title: subscriptions
+    summary: Subscribe and unsubscribe accounts on this socket.
+    description: |
+      Socket.IO event `subscriptions`, sent by the client **with an acknowledgement callback**.
+      The acknowledgement carries the result (see `SubscriptionAck`). Without a callback you get no
+      result at all.
+    servers:
+      - $ref: '#/servers/production'
+      - $ref: '#/servers/production-direct'
+      - $ref: '#/servers/development'
+    messages:
+      Subscribe:
+        $ref: '#/components/messages/Subscribe'
+      Unsubscribe:
+        $ref: '#/components/messages/Unsubscribe'
+
+  subscriptionsAck:
+    address: null
+    title: subscriptions acknowledgement
+    summary: Socket.IO acknowledgement of a `subscriptions` event.
+    servers:
+      - $ref: '#/servers/production'
+      - $ref: '#/servers/production-direct'
+      - $ref: '#/servers/development'
+    messages:
+      SubscriptionAck:
+        $ref: '#/components/messages/SubscriptionAck'
+
+  stream:
+    address: stream
+    title: stream
+    summary: Snapshot and live updates for every subscribed account.
+    description: |
+      Socket.IO event `stream`, sent by the server. One event carries one message; the `type` field
+      says which. Messages of all accounts on the socket share this event: route them by
+      `brandId` + `accountId`.
+
+      Per account, after a successful SUBSCRIBE:
+      1. snapshot: `AccountStatus`, then `Position` and `OpenOrder` messages for what is open now;
+      2. `Property` with `name: SyncEnd`;
+      3. live updates, in the order the trading engine produced them.
+
+      `SyncEnd` is sent before the SUBSCRIBE acknowledgement.
+    servers:
+      - $ref: '#/servers/production'
+      - $ref: '#/servers/production-direct'
+      - $ref: '#/servers/development'
+    messages:
+      AccountStatus:
+        $ref: '#/components/messages/AccountStatus'
+      Position:
+        $ref: '#/components/messages/Position'
+      ClosePosition:
+        $ref: '#/components/messages/ClosePosition'
+      OpenOrder:
+        $ref: '#/components/messages/OpenOrder'
+      Property:
+        $ref: '#/components/messages/Property'
+
+  accountsTokens:
+    address: /auth/jwt/accounts/tokens
+    title: POST /auth/jwt/accounts/tokens
+    summary: HTTP endpoint that returns a Streams API token for each of the user's
+      accounts.
+    description: |
+      `POST https://live.tradelocker.com/backend-api/auth/jwt/accounts/tokens` for live accounts,
+      `https://demo.tradelocker.com/backend-api/...` for demo accounts. Plain HTTPS with a JSON body,
+      not Socket.IO. Do not send `developer-api-key` here.
+
+      The response has no `brandId`. Read the brand and account from the token's `brand` and `aid`
+      claims (decode the JWT payload; you do not need to verify it, the Streams API does).
+    servers:
+      - $ref: '#/servers/auth-live'
+      - $ref: '#/servers/auth-demo'
+      - $ref: '#/servers/auth-staging'
+    messages:
+      AccountsTokensRequest:
+        $ref: '#/components/messages/AccountsTokensRequest'
+      AccountsTokensResponse:
+        $ref: '#/components/messages/AccountsTokensResponse'
+    bindings:
+      http:
+        bindingVersion: 0.3.0
+
+operations:
+  receiveConnectionStatus:
+    action: receive
+    title: Receive connection status
+    channel:
+      $ref: '#/channels/connection'
+    tags:
+      - name: streams
+
+  subscribe:
+    action: send
+    title: Subscribe or unsubscribe an account
+    summary: Emit `subscriptions` with an acknowledgement callback.
+    description: |
+      **SUBSCRIBE** takes exactly `action` and `token`; any other key is rejected with
+      `validationError - unrecognized_keys`. The brand, account and environment come from the token.
+
+      **UNSUBSCRIBE** takes exactly `action`, `brandId` and `accountId`. Both must match the
+      subscription exactly: use the token's `brand` claim (uppercase) and an `accountId` of the form
+      `L#<number>` or `D#<number>`.
+
+      A SUBSCRIBE for an account already subscribed or still connecting on this socket is answered
+      with `alreadyConnectedError` and changes nothing. Subscribing the same account on two sockets
+      gives two independent streams.
+    channel:
+      $ref: '#/channels/subscriptions'
+    messages:
+      - $ref: '#/channels/subscriptions/messages/Subscribe'
+      - $ref: '#/channels/subscriptions/messages/Unsubscribe'
+    reply:
+      channel:
+        $ref: '#/channels/subscriptionsAck'
+      messages:
+        - $ref: '#/channels/subscriptionsAck/messages/SubscriptionAck'
+    tags:
+      - name: streams
+
+  receiveStream:
+    action: receive
+    title: Receive account updates
+    channel:
+      $ref: '#/channels/stream'
+    tags:
+      - name: streams
+
+  getAccountsTokens:
+    action: send
+    title: Get account tokens
+    summary: Exchange the user's credentials for one Streams API token per account.
+    channel:
+      $ref: '#/channels/accountsTokens'
+    messages:
+      - $ref: '#/channels/accountsTokens/messages/AccountsTokensRequest'
+    reply:
+      channel:
+        $ref: '#/channels/accountsTokens'
+      messages:
+        - $ref: '#/channels/accountsTokens/messages/AccountsTokensResponse'
+    bindings:
+      http:
+        method: POST
+        bindingVersion: 0.3.0
+    tags:
+      - name: auth
+
+components:
+  securitySchemes:
+    developerApiKey:
+      type: httpApiKey
+      name: developer-api-key
+      in: header
+      description: |
+        Your developer API key, sent as an HTTP header on the Socket.IO handshake. Browsers cannot
+        set custom headers on a WebSocket handshake, so connect from a server, not from a web page.
+        Keep the key out of source control, logs and chat messages.
+
+  messages:
+    ConnectionStatus:
+      name: ConnectionStatus
+      title: connection status
+      payload:
+        $ref: '#/components/schemas/ConnectionStatus'
+      examples:
+        - name: connected
+          payload:
+            status: ok
+            code: connected
+            message: Successfully connected to the streams socket server.
+        - name: invalidApiKey
+          summary: The `developer-api-key` header is missing or appears more than once.
+          payload:
+            status: error
+            code: unauthorized.streams.invalidApiKey
+            message: "Invalid API key provided, make sure header 'developer-api-key' is
+              valid."
+        - name: developerNotFound
+          summary: The key is not a known developer key.
+          payload:
+            status: error
+            code: unauthorized.streams.developer.notFound
+            message: "Developer with the API key 'tl-abc***' not found."
+        - name: conflict
+          summary: The developer key already has its maximum number of open sockets.
+          payload:
+            status: error
+            code: conflict
+            message: 'Developer EXAMPLE has reached the maximum number of connections: 100
+              (max: 100).'
+        - name: shutdown
+          payload:
+            status: ok
+            code: disconnected
+            message: Disconnected from all accounts as the application is shutting down.
+
+    Subscribe:
+      name: Subscribe
+      title: SUBSCRIBE
+      payload:
+        $ref: '#/components/schemas/SubscribeAction'
+      examples:
+        - name: subscribe
+          payload:
+            action: SUBSCRIBE
+            token: eyJhbGciOiJSUzI1NiJ9.eyJicmFuZCI6IkJBUElBIiwiYWlkIjoiTCM3MzcwMzEifQ.c2lnbmF0dXJl
+
+    Unsubscribe:
+      name: Unsubscribe
+      title: UNSUBSCRIBE
+      payload:
+        $ref: '#/components/schemas/UnsubscribeAction'
+      examples:
+        - name: unsubscribe
+          payload:
+            action: UNSUBSCRIBE
+            brandId: BAPIA
+            accountId: 'L#737031'
+
+    SubscriptionAck:
+      name: SubscriptionAck
+      title: subscriptions acknowledgement
+      payload:
+        $ref: '#/components/schemas/SubscriptionAck'
+      examples:
+        - name: subscribed
+          payload:
+            status: ok
+            code: connected
+            message: 'Connected to account BAPIA#L#737031'
+            remainingRequests: 4999
+        - name: unsubscribed
+          payload:
+            status: ok
+            code: disconnected
+            message: 'Disconnected from account BAPIA#L#737031'
+        - name: alreadyConnected
+          payload:
+            status: error
+            code: alreadyConnectedError
+            message: 'Already connected to account BAPIA#L#737031'
+        - name: noSuchConnection
+          summary: UNSUBSCRIBE for an account this socket does not have, for example a
+            wrongly cased brand.
+          payload:
+            status: error
+            code: noSuchConnectionError
+            message: 'No such connection for account Bapia#L#737031'
+        - name: invalidJwt
+          payload:
+            status: error
+            code: invalidJwt
+            message: Failed to decode token
+        - name: tooManyRequests
+          payload:
+            status: error
+            code: tooManyRequests
+            message: Too many subscribe requests. Please wait. maxRequests=5000 windowMs=50
+              ms
+        - name: connectionError
+          summary: The account could not be connected (token exchange or trade-node logon
+            failed). Retry with backoff.
+          payload:
+            status: error
+            code: connectionError
+            message: unknown
+            remainingRequests: 4998
+        - name: validationError
+          payload:
+            status: error
+            code: validationError - unrecognized_keys
+            message: "Unrecognized key(s) in object: 'accountId'"
+
+    AccountStatus:
+      name: AccountStatus
+      title: AccountStatus
+      summary: Balance, equity, margin and per-position PnL of one account.
+      payload:
+        $ref: '#/components/schemas/AccountStatus'
+      examples:
+        - name: accountStatus
+          payload:
+            type: AccountStatus
+            currency: USD
+            balance: '9888.95'
+            balanceWithoutCredit: '9888.95'
+            equity: '10628.95'
+            marginAvailable: '3583.45'
+            marginUsed: '6305.5'
+            blockedBalance: '0'
+            credit: '0'
+            positionPnLs:
+              - positionId: '144115188076017329'
+                pnl: '740'
+            brandId: BAPIA
+            userId: 4f78705c-d09e-4fa8-9744-7a87d81b4327
+            accountId: 'L#706984'
+
+    Position:
+      name: Position
+      title: Position
+      summary: An open position, sent in the snapshot and whenever it changes.
+      payload:
+        $ref: '#/components/schemas/Position'
+      examples:
+        - name: position
+          payload:
+            type: Position
+            lots: '0.01'
+            lotSize: '10'
+            units: '0.1'
+            instrument: ETHUSD
+            openPrice: '3299.71'
+            openDateTime: '2026-03-19T20:15:51.465Z'
+            positionId: '144115188076017329'
+            openOrderId: '144115188076017328'
+            maintMargin: '3.06485'
+            side: BUY
+            brandId: BAPIA
+            userId: 4f78705c-d09e-4fa8-9744-7a87d81b4327
+            accountId: 'L#617509'
+
+    ClosePosition:
+      name: ClosePosition
+      title: ClosePosition
+      summary: A position was closed.
+      payload:
+        $ref: '#/components/schemas/ClosePosition'
+      examples:
+        - name: closePosition
+          payload:
+            type: ClosePosition
+            positionId: '144115188076313663'
+            closePrice: '0.62947'
+            closeDateTime: '2026-01-27T13:43:53.987Z'
+            brandId: BAPIA
+            userId: 4f78705c-d09e-4fa8-9744-7a87d81b4327
+            accountId: 'L#775077'
+
+    OpenOrder:
+      name: OpenOrder
+      title: OpenOrder
+      summary: An order, sent in the snapshot and on every change, including fills and
+        cancels.
+      payload:
+        $ref: '#/components/schemas/OpenOrder'
+      examples:
+        - name: filledMarketOrder
+          payload:
+            type: OpenOrder
+            orderId: '144115188077153593'
+            instrument: AUDUSD
+            amount: '10'
+            lotSize: '100000'
+            side: BUY
+            price: '0.62956'
+            status: STATUS_FILLED
+            orderType: MARKET
+            tif: IOC
+            filledAmount: '10'
+            averageFilledPrice: '0.62962'
+            positionId: '144115188076313665'
+            isOpen: true
+            createdDateTime: '2026-01-27T13:43:57.327Z'
+            lastUpdate: '2026-01-27T13:43:57.532Z'
+            brandId: BAPIA
+            userId: 4f78705c-d09e-4fa8-9744-7a87d81b4327
+            accountId: 'L#706984'
+
+    Property:
+      name: Property
+      title: Property
+      summary: Stream lifecycle marker for one account (SyncEnd, Disconnected).
+      payload:
+        $ref: '#/components/schemas/Property'
+      examples:
+        - name: syncEnd
+          summary: The snapshot for this account is complete; what follows is live.
+          payload:
+            type: Property
+            name: SyncEnd
+            brandId: BAPIA
+            userId: 4f78705c-d09e-4fa8-9744-7a87d81b4327
+            accountId: 'L#737031'
+        - name: disconnected
+          summary: This account's stream ended (after an UNSUBSCRIBE, or on the server
+            side).
+          payload:
+            type: Property
+            name: Disconnected
+            brandId: BAPIA
+            userId: 4f78705c-d09e-4fa8-9744-7a87d81b4327
+            accountId: 'L#737031'
+
+    AccountsTokensRequest:
+      name: AccountsTokensRequest
+      title: Account tokens request
+      contentType: application/json
+      payload:
+        $ref: '#/components/schemas/AccountsTokensRequest'
+      examples:
+        - name: request
+          payload:
+            email: trader@example.com
+            password: '<password>'
+            server: BAPIA
+
+    AccountsTokensResponse:
+      name: AccountsTokensResponse
+      title: Account tokens response
+      contentType: application/json
+      payload:
+        $ref: '#/components/schemas/AccountsTokensResponse'
+      examples:
+        - name: response
+          payload:
+            data:
+              - accessToken: eyJhbGciOiJSUzI1NiJ9.eyJicmFuZCI6IkJBUElBIiwiYWlkIjoiTCM3MzcwMzEifQ.c2lnbmF0dXJl
+                expireDate: '2026-10-16T10:28:32.000Z'
+                accountId: 'L#737031'
+
+  schemas:
+    Decimal:
+      type: string
+      pattern: '^-?[0-9]+(\.[0-9]+)?$'
+      description: Decimal number as a string, without exponent or trailing zeros.
+        Parse with a decimal type.
+      examples:
+        - '10628.95'
+    Timestamp:
+      type: string
+      format: date-time
+      description: ISO-8601 instant in UTC.
+      examples:
+        - '2026-01-27T13:43:57.532Z'
+    BrandId:
+      type: string
+      description: |
+        Brand (the `server` the user logs in to), as in the token's `brand` claim. Matched exactly:
+        reuse it as received.
+      examples:
+        - BAPIA
+    AccountId:
+      type: string
+      pattern: '^[LD]#[0-9]+$'
+      description: Account, `L#` for live and `D#` for demo, as in the token's `aid` claim.
+      examples:
+        - 'L#737031'
+    UserId:
+      type: string
+      description: TradeLocker user ID (UUID).
+      examples:
+        - 4f78705c-d09e-4fa8-9744-7a87d81b4327
+    Id:
+      type: string
+      pattern: '^[0-9]+$'
+      description: Numeric identifier as a string. Do not parse it as a double; it
+        exceeds 2^53.
+      examples:
+        - '144115188076017329'
+    Side:
+      type: string
+      enum: [ BUY, SELL ]
+    ConnectionStatus:
+      type: object
+      required: [ status, code, message ]
+      properties:
+        status:
+          type: string
+          enum: [ ok, error ]
+        code:
+          type: string
+          description: Machine-readable result. Branch on `code`, never on `message`.
+          enum:
+            - connected
+            - disconnected
+            - unauthorized.streams.invalidApiKey
+            - unauthorized.streams.developer.notFound
+            - conflict
+            - unknown
+        message:
+          type: string
+          description: Human-readable detail. Wording can change.
+    SubscriptionAck:
+      type: object
+      required: [ status, code, message ]
+      properties:
+        status:
+          type: string
+          enum: [ ok, error ]
+        code:
+          type: string
+          description: |
+            - `connected`: subscribed. `SyncEnd` for the account has already been sent.
+            - `disconnected`: unsubscribed.
+            - `alreadyConnectedError`: already subscribed (or connecting) on this socket. Treat as subscribed.
+            - `noSuchConnectionError`: UNSUBSCRIBE for an account this socket does not have. Check the exact `brandId` and `accountId`.
+            - `invalidJwt`: token malformed, expired or not for this environment. Fetch a new token.
+            - `tooManyRequests`: rate limit of the developer key. Wait and retry.
+            - `connectionError`: the account could not be connected. Retry with backoff.
+            - `clientNotFound`: the socket is closing or was rejected. Reconnect.
+            - `validationError - <issue>`: malformed payload; `<issue>` is one of `invalid_type`, `invalid_union_discriminator`, `invalid_string`, `unrecognized_keys`.
+            - `unknown`: unexpected server error. Retry with backoff.
+          examples:
+            - connected
+            - alreadyConnectedError
+            - validationError - unrecognized_keys
+        message:
+          type: string
+          description: Human-readable detail. Wording can change.
+        remainingRequests:
+          type: integer
+          description: SUBSCRIBE requests left in the developer key's rate-limit window.
+
+    SubscribeAction:
+      type: object
+      additionalProperties: false
+      required: [ action, token ]
+      properties:
+        action:
+          type: string
+          const: SUBSCRIBE
+        token:
+          type: string
+          description: Account token (`accessToken`) from the account tokens endpoint.
+    UnsubscribeAction:
+      type: object
+      additionalProperties: false
+      required: [ action, brandId, accountId ]
+      properties:
+        action:
+          type: string
+          const: UNSUBSCRIBE
+        brandId:
+          $ref: '#/components/schemas/BrandId'
+        accountId:
+          $ref: '#/components/schemas/AccountId'
+
+    AccountStatus:
+      type: object
+      required:
+        [
+          type,
+          currency,
+          balance,
+          balanceWithoutCredit,
+          marginAvailable,
+          marginUsed,
+          blockedBalance,
+          credit,
+          positionPnLs,
+          brandId,
+          userId,
+          accountId
+        ]
+      properties:
+        type:
+          type: string
+          const: AccountStatus
+        currency:
+          type: string
+          description: Account currency.
+          examples: [ USD ]
+        balance:
+          $ref: '#/components/schemas/Decimal'
+        balanceWithoutCredit:
+          $ref: '#/components/schemas/Decimal'
+        equity:
+          $ref: '#/components/schemas/Decimal'
+        marginAvailable:
+          $ref: '#/components/schemas/Decimal'
+        marginUsed:
+          $ref: '#/components/schemas/Decimal'
+        blockedBalance:
+          $ref: '#/components/schemas/Decimal'
+        credit:
+          $ref: '#/components/schemas/Decimal'
+        positionPnLs:
+          type: array
+          description: Gross PnL of each open position; empty when there are none.
+          items:
+            type: object
+            required: [ positionId, pnl ]
+            properties:
+              positionId:
+                $ref: '#/components/schemas/Id'
+              pnl:
+                $ref: '#/components/schemas/Decimal'
+        brandId:
+          $ref: "#/components/schemas/BrandId"
+        userId:
+          $ref: "#/components/schemas/UserId"
+        accountId:
+          $ref: "#/components/schemas/AccountId"
+
+    Position:
+      type: object
+      required:
+        [
+          type,
+          lots,
+          lotSize,
+          units,
+          instrument,
+          openPrice,
+          positionId,
+          openOrderId,
+          maintMargin,
+          side,
+          brandId,
+          userId,
+          accountId
+        ]
+      properties:
+        type:
+          type: string
+          const: Position
+        lots:
+          $ref: '#/components/schemas/Decimal'
+        lotSize:
+          $ref: '#/components/schemas/Decimal'
+        units:
+          $ref: '#/components/schemas/Decimal'
+          description: '`lots` multiplied by `lotSize`.'
+        instrument:
+          type: string
+          examples: [ ETHUSD ]
+        openPrice:
+          $ref: '#/components/schemas/Decimal'
+        openDateTime:
+          $ref: '#/components/schemas/Timestamp'
+        positionId:
+          $ref: '#/components/schemas/Id'
+        openOrderId:
+          $ref: '#/components/schemas/Id'
+        stopLossOrderId:
+          $ref: '#/components/schemas/Id'
+        takeProfitOrderId:
+          $ref: '#/components/schemas/Id'
+        maintMargin:
+          $ref: '#/components/schemas/Decimal'
+        side:
+          $ref: '#/components/schemas/Side'
+        brandId:
+          $ref: "#/components/schemas/BrandId"
+        userId:
+          $ref: "#/components/schemas/UserId"
+        accountId:
+          $ref: "#/components/schemas/AccountId"
+
+    ClosePosition:
+      type: object
+      required: [ type, positionId, brandId, userId, accountId ]
+      properties:
+        type:
+          type: string
+          const: ClosePosition
+        positionId:
+          $ref: '#/components/schemas/Id'
+        closePrice:
+          $ref: '#/components/schemas/Decimal'
+        closeDateTime:
+          $ref: '#/components/schemas/Timestamp'
+        brandId:
+          $ref: "#/components/schemas/BrandId"
+        userId:
+          $ref: "#/components/schemas/UserId"
+        accountId:
+          $ref: "#/components/schemas/AccountId"
+
+    OpenOrder:
+      type: object
+      required:
+        [
+          type,
+          orderId,
+          instrument,
+          amount,
+          lotSize,
+          filledAmount,
+          averageFilledPrice,
+          isOpen,
+          brandId,
+          userId,
+          accountId
+        ]
+      properties:
+        type:
+          type: string
+          const: OpenOrder
+        orderId:
+          $ref: '#/components/schemas/Id'
+        instrument:
+          type: string
+        amount:
+          $ref: '#/components/schemas/Decimal'
+        lotSize:
+          $ref: '#/components/schemas/Decimal'
+        side:
+          $ref: '#/components/schemas/Side'
+        price:
+          $ref: '#/components/schemas/Decimal'
+        status:
+          type: string
+          enum:
+            - STATUS_NONE
+            - STATUS_PENDING_NEW
+            - STATUS_PENDING_EXECUTION
+            - STATUS_PENDING_CANCEL
+            - STATUS_PENDING_REPLACE
+            - STATUS_PENDING_REPLACE_NOT_ACTIVE
+            - STATUS_NEW
+            - STATUS_ACCEPTED
+            - STATUS_REPLACED
+            - STATUS_PART_FILLED
+            - STATUS_FILLED
+            - STATUS_CANCELED
+            - STATUS_REFUSED
+            - STATUS_RESTATED
+            - EXEC_TYPE_ACTIVATED
+            - STATUS_WAITING_MARKET
+            - STATUS_OFF_MARKET
+            - STATUS_UNPLACED
+            - STATUS_REMOVED
+            - STATUS_MODIFY_TRADING_MODE
+        orderType:
+          type: string
+          enum: [ MANUAL, MARKET, STOP, LIMIT, STOP_LIMIT, TRAILING_STOP ]
+        tif:
+          type: string
+          description: Time in force.
+          enum: [ DAY, GTC, IOC, GTD, FOK, MOO, MOC, GTS ]
+        filledAmount:
+          $ref: '#/components/schemas/Decimal'
+        averageFilledPrice:
+          $ref: '#/components/schemas/Decimal'
+        stopPrice:
+          $ref: '#/components/schemas/Decimal'
+        slPrice:
+          $ref: '#/components/schemas/Decimal'
+        slPriceType:
+          type: string
+          enum: [ ABSOLUTE, OFFSET, TRAILING_STOP_OFFSET ]
+        slLimitPrice:
+          $ref: '#/components/schemas/Decimal'
+        tpPrice:
+          $ref: '#/components/schemas/Decimal'
+        tpPriceType:
+          type: string
+          enum: [ ABSOLUTE, OFFSET, TRAILING_STOP_OFFSET ]
+        trStopOffset:
+          $ref: '#/components/schemas/Decimal'
+        positionId:
+          $ref: '#/components/schemas/Id'
+        isOpen:
+          type: boolean
+        createdDateTime:
+          $ref: '#/components/schemas/Timestamp'
+        lastUpdate:
+          $ref: '#/components/schemas/Timestamp'
+        expireDateTime:
+          $ref: '#/components/schemas/Timestamp'
+        brandId:
+          $ref: "#/components/schemas/BrandId"
+        userId:
+          $ref: "#/components/schemas/UserId"
+        accountId:
+          $ref: "#/components/schemas/AccountId"
+
+    Property:
+      type: object
+      required: [ type, name, brandId, userId, accountId ]
+      properties:
+        type:
+          type: string
+          const: Property
+        name:
+          type: string
+          enum: [ SyncEnd, Disconnected ]
+          description: |
+            `SyncEnd`: snapshot complete, live updates follow.
+            `Disconnected`: this account's stream ended. Expected after your own UNSUBSCRIBE;
+            otherwise subscribe it again (with a fresh token if the old one has expired).
+        brandId:
+          $ref: "#/components/schemas/BrandId"
+        userId:
+          $ref: "#/components/schemas/UserId"
+        accountId:
+          $ref: "#/components/schemas/AccountId"
+
+    AccountsTokensRequest:
+      type: object
+      required: [ email, password, server ]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          format: password
+        server:
+          type: string
+          description: The brand (server) the user logs in to.
+    AccountsTokensResponse:
+      type: object
+      required: [ data ]
+      properties:
+        data:
+          type: array
+          items:
+            type: object
+            required: [ accessToken, expireDate, accountId ]
+            properties:
+              accessToken:
+                type: string
+                description: |
+                  Account token (JWT) for SUBSCRIBE. Claims include `brand` (brandId), `aid` (accountId),
+                  `host` (environment) and `exp`.
+              expireDate:
+                $ref: '#/components/schemas/Timestamp'
+                description: When the token expires. Subscribing needs a token that has not
+                  expired.
+              accountId:
+                $ref: '#/components/schemas/AccountId'

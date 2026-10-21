@@ -1,1 +1,9 @@
-node_modules
+node_modules/
+.DS_Store
+# example builds
+examples/java/target/
+examples/csharp/bin/
+examples/csharp/obj/
+examples/python/.venv/
+__pycache__/
+.env

@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- TradeLocker Streams API example for .NET: one Socket.IO connection, many accounts, reconnect-safe. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>StreamsExample</AssemblyName>
+    <RootNamespace>TradeLocker.Streams.Example</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Socket.IO v4 client (doghappy/socket.io-client-csharp), System.Text.Json serializer built in. -->
+    <PackageReference Include="SocketIOClient" Version="4.0.5" />
+  </ItemGroup>
+
+</Project>

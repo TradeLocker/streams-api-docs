@@ -1,0 +1,107 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  docs:
+    name: spec and docs are in sync
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # Validates the AsyncAPI spec and fails when docs/ or asyncapi/*.json were not rebuilt.
+      - run: npm run check
+
+  node:
+    name: example / node
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            examples/node/package-lock.json
+      - run: npm ci
+      - run: npm ci
+        working-directory: examples/node
+      - run: npm run typecheck
+        working-directory: examples/node
+      - run: node scripts/e2e.mjs --cwd examples/node -- npm start --silent
+      - run: node scripts/e2e.mjs --cwd examples/node --drop transport -- npm start --silent
+
+  python:
+    name: example / python
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - uses: actions/setup-python@v5
+        with:
+          # The oldest version the example supports.
+          python-version: "3.10"
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --locked
+        working-directory: examples/python
+      - run: node scripts/e2e.mjs --cwd examples/python -- uv run --locked main.py
+      - run: node scripts/e2e.mjs --cwd examples/python --drop transport -- uv run --locked main.py
+
+  java:
+    name: example / java
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+      - run: mvn -B -q -f examples/java/pom.xml package
+      - run: node scripts/e2e.mjs --cwd examples/java -- java -jar target/streams-api-example.jar
+      - run: node scripts/e2e.mjs --cwd examples/java --drop transport -- java -jar target/streams-api-example.jar
+
+  csharp:
+    name: example / csharp
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - run: dotnet build -c Release -warnaserror
+        working-directory: examples/csharp
+      # Run the built DLL, not `dotnet run`: `dotnet run` does not forward a SIGINT sent to its own
+      # process to the app, and the check ends the example with SIGINT.
+      - run: node scripts/e2e.mjs --cwd examples/csharp --timeout 120 -- dotnet bin/Release/net10.0/StreamsExample.dll
+      # SocketIOClient does not notice a bare WebSocket close; the example's 61 s ping watchdog does.
+      - run: node scripts/e2e.mjs --cwd examples/csharp --timeout 150 --drop transport -- dotnet bin/Release/net10.0/StreamsExample.dll

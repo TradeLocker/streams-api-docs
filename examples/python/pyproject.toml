@@ -1,0 +1,17 @@
+[project]
+name = "tradelocker-streams-example-python"
+version = "1.0.0"
+description = "TradeLocker Streams API example: one Socket.IO connection, many accounts, reconnect-safe."
+license = "MIT"
+requires-python = ">=3.10"
+dependencies = [
+    "python-socketio[asyncio-client]==5.17.0",
+    "python-engineio==4.14.0",
+    "aiohttp==3.14.3",
+]
+
+[tool.uv]
+# This is an example to run, not a library to install: no build step, no package.
+package = false
+# Resolve only releases that have been public for a while (also for transitive dependencies).
+exclude-newer = "2026-10-02T00:00:00Z"

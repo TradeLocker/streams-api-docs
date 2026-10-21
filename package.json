@@ -1,17 +1,23 @@
 {
-    "name": "stream-api-example",
-    "version": "0.0.2",
-    "description": "Example project using Socket.IO client",
-    "main": "index.js",
-    "type": "module",
-    "scripts": {
-        "start": "node index.js"
-    },
-    "dependencies": {
-        "socket.io-client": "4.8.1",
-        "axios": "1.8.4",
-        "zod": "3.25.73"
-    },
-    "author": "Tradelocker Ltd.",
-    "license": "ISC"
+  "name": "streams-api-docs",
+  "private": true,
+  "description": "TradeLocker Streams API: AsyncAPI contract, rendered docs, examples and a local mock server.",
+  "license": "ISC",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "validate": "asyncapi validate asyncapi/streams-api.asyncapi.yaml --fail-severity=warn",
+    "build": "node scripts/build-docs.mjs",
+    "check": "node scripts/build-docs.mjs --check",
+    "mock": "node mock-server/server.mjs"
+  },
+  "devDependencies": {
+    "@asyncapi/cli": "6.2.0",
+    "@asyncapi/html-template": "3.5.6",
+    "socket.io": "4.8.4",
+    "yaml": "2.9.1"
+  },
+  "author": "TradeLocker Ltd."
 }
