@@ -1,14 +1,14 @@
 // Builds everything GitHub Pages serves from docs/, from the one source of truth
 // asyncapi/streams-api.asyncapi.yaml:
 //   asyncapi/streams-api.asyncapi.json   JSON copy of the spec (committed, for tools that want JSON)
-//   docs/index.html                      rendered AsyncAPI page (single file, works offline)
+//   docs/index.html                      the page: Scalar API Reference (loaded from jsDelivr) around the
+//                                        spec embedded as JSON, same page as the Brand Socket API docs
 //   docs/asyncapi.yaml, docs/asyncapi.json
 //
 //   node scripts/build-docs.mjs           write the files
 //   node scripts/build-docs.mjs --check   fail if the committed files are not what the spec produces
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
@@ -27,34 +27,48 @@ function cli(...args) {
   });
 }
 
+// Pinned: bump on purpose and look at the page. Same version as the Brand Socket API docs.
+const SCALAR = "https://cdn.jsdelivr.net/npm/@scalar/api-reference@1.73.1";
+
+function page(spec, json) {
+  const { title } = spec.info;
+  // The spec sits in a <script type="application/json"> element; "<" as \u003c cannot end it early.
+  const embedded = json.trimEnd().replace(/</g, "\\u003c");
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>${title}</title>
+    <meta name="description" content="Socket.IO contract of the ${title}: connection, stream and subscriptions events, and the account token endpoint." />
+  </head>
+  <body>
+    <div id="app"></div>
+    <script id="spec" type="application/json">${embedded}</script>
+    <script src="${SCALAR}"></script>
+    <script>
+      Scalar.createApiReference('#app', {
+        content: JSON.parse(document.getElementById('spec').textContent),
+        hideClientButton: true,
+        metaData: { title: ${JSON.stringify(title)} },
+      })
+    </script>
+  </body>
+</html>
+`;
+}
+
 function build(outDir) {
   const yamlText = readFileSync(specYaml, "utf8");
-  const json = JSON.stringify(parse(yamlText), null, 2) + "\n";
-
-  const rendered = mkdtempSync(join(tmpdir(), "streams-api-docs-"));
-  try {
-    cli(
-      "generate",
-      "fromTemplate",
-      specYaml,
-      join(root, "node_modules", "@asyncapi", "html-template"),
-      "--output",
-      rendered,
-      "--force-write",
-      "--no-interactive",
-      "--param",
-      "singleFile=true",
-    );
-    return {
-      [specJson]: json,
-      [join(outDir, "asyncapi.json")]: json,
-      [join(outDir, "asyncapi.yaml")]: yamlText,
-      [join(outDir, "index.html")]: readFileSync(join(rendered, "index.html"), "utf8"),
-      [join(outDir, ".nojekyll")]: "",
-    };
-  } finally {
-    rmSync(rendered, { recursive: true, force: true });
-  }
+  const spec = parse(yamlText);
+  const json = JSON.stringify(spec, null, 2) + "\n";
+  return {
+    [specJson]: json,
+    [join(outDir, "asyncapi.json")]: json,
+    [join(outDir, "asyncapi.yaml")]: yamlText,
+    [join(outDir, "index.html")]: page(spec, json),
+    [join(outDir, ".nojekyll")]: "",
+  };
 }
 
 cli("validate", specYaml, "--fail-severity=error");
