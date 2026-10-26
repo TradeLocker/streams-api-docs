@@ -122,3 +122,10 @@ npm run build    # validate, regenerate asyncapi/*.json and docs/
 
 Commit the generated files with the change. CI fails when `docs/` does not match the spec
 (`npm run check`). GitHub Pages serves the `docs/` folder of `main`.
+
+`docs/index.html` is a small page that embeds the spec and renders it with
+[Scalar](https://scalar.com/) loaded from jsDelivr (version pinned in `scripts/build-docs.mjs`), the same
+page as the [Brand Socket API docs](https://tradelocker.github.io/brand-socket-api-docs/).
+
+The previous docs address, `https://api.tradelocker.com/streams-api/socket/docs`, redirects to
+https://tradelocker.github.io/streams-api-docs/.
