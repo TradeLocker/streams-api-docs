@@ -68,6 +68,7 @@ one breaks a naive integration.
 - No reconnect after `io server disconnect`: call `socket.connect()` yourself, with backoff.
 - `emit` while disconnected is buffered and sent on reconnect. Only subscribe after the `connection` event of the current connection.
 - Use `socket.timeout(ms).emitWithAck(...)`; without `.timeout()` an ack can wait forever.
+- `npm start` runs the client under `sh -c`; on Linux a SIGINT or SIGTERM sent to npm alone never reaches it. Run `node` directly under a supervisor.
 
 **python-socketio (AsyncClient, 5.17)**
 - The URL path is ignored: pass `namespaces=["/streams-api"]` to `connect()` and `namespace=` to every handler and call, or the client silently joins `/` and never sees `connection`.

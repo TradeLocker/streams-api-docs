@@ -24,6 +24,16 @@ TL_DEVELOPER_API_KEY=tl-mock-developer-key TL_EMAIL=trader@example.com TL_PASSWO
 npm start
 ```
 
+To run the end-to-end check against it (from the repository root):
+
+```bash
+node scripts/e2e.mjs --cwd examples/node -- node --experimental-strip-types src/index.ts
+```
+
+Do not test with `npm start` here: npm runs the script under `sh -c`, which on Linux does not pass a
+SIGINT sent to npm on to the app (Ctrl+C in a terminal works, because the terminal signals the app
+directly).
+
 ## Files
 
 - [`src/index.ts`](src/index.ts): the whole client. Every `PITFALL:` comment marks a mistake seen in a real integration.

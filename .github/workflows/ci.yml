@@ -43,8 +43,10 @@ jobs:
         working-directory: examples/node
       - run: npm run typecheck
         working-directory: examples/node
-      - run: node scripts/e2e.mjs --cwd examples/node -- npm start --silent
-      - run: node scripts/e2e.mjs --cwd examples/node --drop transport -- npm start --silent
+      # Run node directly, not `npm start`: npm runs the script under `sh -c`, which on Linux does not
+      # pass a SIGINT sent to npm on to the app, and the check ends the example with SIGINT.
+      - run: node scripts/e2e.mjs --cwd examples/node -- node --experimental-strip-types src/index.ts
+      - run: node scripts/e2e.mjs --cwd examples/node --drop transport -- node --experimental-strip-types src/index.ts
 
   python:
     name: example / python

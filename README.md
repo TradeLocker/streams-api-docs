@@ -96,7 +96,7 @@ result. `--drop transport` drops the socket the way a proxy does, with a bare We
 runs both for every example:
 
 ```bash
-node scripts/e2e.mjs --cwd examples/node -- npm start --silent
+node scripts/e2e.mjs --cwd examples/node -- node --experimental-strip-types src/index.ts
 ```
 
 Point it at your own client the same way before you go live.

@@ -6,7 +6,7 @@
 //   - on SIGINT it unsubscribed each account and exited with status 0.
 // TL_SERVER is passed in lowercase on purpose: the brand must come from the token, not from user input.
 //
-//   node scripts/e2e.mjs --cwd examples/node -- npm start --silent
+//   node scripts/e2e.mjs --cwd examples/node -- node --experimental-strip-types src/index.ts
 //   node scripts/e2e.mjs --drop transport ...   drop the socket with a bare WebSocket close instead
 //                                               of a Socket.IO disconnect (what proxies do)
 import { spawn } from "node:child_process";
